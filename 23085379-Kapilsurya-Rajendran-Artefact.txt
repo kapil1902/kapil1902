@@ -1,0 +1,112 @@
+# Library imports
+import pefile
+import pandas as pd
+from sklearn.ensemble        import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics         import accuracy_score
+
+# Load the dataset
+# CSV of PE header features, each row = one file, labelled malware/benign
+DATA_PATH = '/Users/kapilsurya/Downloads/data_file.csv'
+
+raw_df = pd.read_csv(DATA_PATH)
+print(f"Dataset shape: {raw_df.shape}")   # (62485, 18)
+raw_df.head()
+
+# Data cleaning
+# Drop ID columns – they don't help the model learn patterns
+cleaned_df = raw_df.drop(columns=['FileName', 'md5Hash'])
+
+# Check for missing values / duplicate rows
+null_count  = cleaned_df.isnull().sum().sum()
+dupl_count  = cleaned_df.duplicated().sum()
+print(f"Missing values : {null_count}")   # 0
+print(f"Duplicate rows : {dupl_count}")   # 0
+print(f"Cleaned shape  : {cleaned_df.shape}")  # (62485, 16)
+
+# Class-balance inspection
+# Check how balanced malware vs benign classes are
+label_counts = cleaned_df['Benign'].value_counts()
+label_pct    = cleaned_df['Benign'].value_counts(normalize=True) * 100
+print("Class distribution (counts):\n",      label_counts)
+print("\nClass distribution (percentages):\n", label_pct.round(1))
+# 0 → 35,367 malware  (56.6%)
+# 1 → 27,118 benign   (43.4%)
+
+# Feature / target separation
+# X = input features, y = label we want to predict
+feature_cols = [c for c in cleaned_df.columns if c != 'Benign']
+X = cleaned_df[feature_cols]   # 15 static PE header features
+y = cleaned_df['Benign']        # binary target  (0=malware, 1=benign)
+
+# Stratified 70 / 30 train-test split
+# Keep class ratio the same in both train and test sets
+SEED = 42
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y,
+    test_size    = 0.30,
+    random_state = SEED,
+    stratify     = y        # preserves class ratio in both partitions
+)
+print(f"Training samples : {len(X_train):,}")   # 43,739
+print(f"Test     samples : {len(X_test):,}")    # 18,746
+
+# Train Random Forest classifier
+# 100 decision trees combined into one model
+rf_clf = RandomForestClassifier(
+    n_estimators = 100,
+    random_state = SEED
+)
+rf_clf.fit(X_train, y_train)
+print("Model training complete.")
+
+# Evaluate on held-out test set
+# Test the model on unseen data
+test_preds   = rf_clf.predict(X_test)
+test_acc     = accuracy_score(y_test, test_preds)
+print(f"Test-set accuracy : {test_acc * 100:.2f}%")   # 99.57 %
+
+# PE header feature-extraction function
+def extract_pe_features(executable_path: str) -> pd.DataFrame:
+    """
+    Parse a Windows PE binary and return a single-row DataFrame
+    whose columns match the training feature matrix exactly.
+    """
+    pe_obj = pefile.PE(executable_path)
+
+    header_fields = {
+        'Machine'          : pe_obj.FILE_HEADER.Machine,
+        'DebugSize'        : pe_obj.OPTIONAL_HEADER.DATA_DIRECTORY[6].Size,
+        'DebugRVA'         : pe_obj.OPTIONAL_HEADER.DATA_DIRECTORY[6].VirtualAddress,
+        'MajorImageVersion': pe_obj.OPTIONAL_HEADER.MajorImageVersion,
+        'MajorOSVersion'   : pe_obj.OPTIONAL_HEADER.MajorOperatingSystemVersion,
+        'ExportRVA'        : pe_obj.OPTIONAL_HEADER.DATA_DIRECTORY[0].VirtualAddress,
+        'ExportSize'       : pe_obj.OPTIONAL_HEADER.DATA_DIRECTORY[0].Size,
+        'IatVRA'           : pe_obj.OPTIONAL_HEADER.DATA_DIRECTORY[12].VirtualAddress,
+        'MajorLinkerVersion': pe_obj.OPTIONAL_HEADER.MajorLinkerVersion,
+        'MinorLinkerVersion': pe_obj.OPTIONAL_HEADER.MinorLinkerVersion,
+        'NumberOfSections' : pe_obj.FILE_HEADER.NumberOfSections,
+        'SizeOfStackReserve': pe_obj.OPTIONAL_HEADER.SizeOfStackReserve,
+        'DllCharacteristics': pe_obj.OPTIONAL_HEADER.DllCharacteristics,
+        'ResourceSize'     : pe_obj.OPTIONAL_HEADER.DATA_DIRECTORY[2].Size,
+        'BitcoinAddresses' : 0     # cannot be derived from headers alone
+    }
+    return pd.DataFrame([header_fields])
+
+# Real-time classification – malware sample
+# Run the pipeline on a known malicious file
+malware_path = '/Users/kapilsurya/Downloads/windows.exe'
+live_features = extract_pe_features(malware_path)
+verdict_code  = rf_clf.predict(live_features)[0]
+verdict_label = 'MALICIOUS' if verdict_code == 0 else 'NOT MALICIOUS'
+print(f"File : {malware_path}")
+print(f"Verdict : {verdict_label}")    # MALICIOUS
+
+# Real-time classification – benign sample
+# Run the pipeline on a known benign file
+benign_path  = '/Users/kapilsurya/Downloads/winrar-x64-701.exe'
+live_features = extract_pe_features(benign_path)
+verdict_code  = rf_clf.predict(live_features)[0]
+verdict_label = 'MALICIOUS' if verdict_code == 0 else 'NOT MALICIOUS'
+print(f"File : {benign_path}")
+print(f"Verdict : {verdict_label}")    # NOT MALICIOUS
